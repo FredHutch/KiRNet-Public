@@ -2,8 +2,6 @@
 # KiRNet v3 #
 #############
 library(tictoc)
-library(topGO)
-library(org.Hs.eg.db)
 library(tidyr)
 library(ggplot2)
 library(purrr)
@@ -13,10 +11,6 @@ library(igraph)
 library(readxl)
 library(pheatmap)
 library(colorspace)
-library(ggraph)
-library(htmlwidgets)
-library(networkD3)
-
 
 #############
 # Functions #
