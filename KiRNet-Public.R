@@ -1,3 +1,91 @@
+# Uncomment to set working directory
+# setwd()
+
+load("KiRNet_V3_Initializers")
+
+##########################
+# KiR Elastic Net models #
+##########################
+library(glmnet)
+library(ggplot2)
+library(tictoc)
+library(readxl)
+detach("package:dplyr")
+
+drugTable <- as.data.frame(read_excel("drug_profiles_public.xlsx"))
+kinaseIDs <- colnames(drugTable)[-1]
+drugIDs <- drugTable$Compound
+row.names(drugTable) <- drugIDs
+drugTable <- drugTable[,-1]
+
+kirData <- as.data.frame(read_excel("Huh7_allData_public.xlsx", sheet = "KiRdrugResponses"))
+response <- kirData$`Huh7-Fzd2_Response`
+
+controlIdx <- grep('^control|DMSO|empty|vehicle$', kirData[,1], ignore.case = TRUE) # Check for a control in data, used to normalize and/or include as full kinase activity
+if(length(controlIdx)==1){
+  control <- kirData[controlIdx,2]
+  kirData[controlIdx,1] <- 'Control'
+  response <- response / control}
+inputs <- drugTable[match(kirData[,1],drugIDs),]
+rm(controlIdx, control)
+
+standardize <- FALSE        # Should x values (inhibitions) be standardized
+controlWeight <- 1          # Relative weight to assign to control data point. Set to 0 to exclude, 1 for equal weighting.
+alphaVals <- seq(from = 0.0, to = 1.0, by = 0.1)         # Sequence of alpha values (between 0 and 1) to use
+
+numLambdas <- 300
+lambdaMin <- 0.005
+nfolds <- length(response)          # For LOOCV: length(response)     otherwise, usually 5 or 10
+obsWeights <- ifelse(kirData[,1] == 'Control', controlWeight, 1)
+varPenalty <- rep(1, ncol(inputs))
+keep <- TRUE
+algorithmType <- 'naive'    # Can be 'naive' or 'covariance'
+
+
+# Model Construction
+
+alphaLabels <- paste0('alpha = ', alphaVals)
+
+# Run elastic net with the specified parameters
+glmobjs <- lapply(alphaVals, function(x) {
+  glmobj <- cv.glmnet(x = as.matrix(inputs), y = response,
+                      family = 'gaussian', weights = obsWeights, alpha = x,
+                      nlambda = numLambdas, lambda.min.ratio = lambdaMin, 
+                      standardize = standardize, intercept = TRUE, nfolds = nfolds, 
+                      penalty.factor = varPenalty, type.gaussian=algorithmType, keep = keep, grouped = FALSE)
+  glmobj$s <- glmobj$lambda.min
+  glmobj
+})
+names(glmobjs) <- alphaVals
+
+#Outputs are formatted as dataframes
+model <- sapply(glmobjs, function(x) as.matrix(coef(x, s = x$s)))
+dimnames(model) <- list(c('Intercept', kinaseIDs), alphaLabels)
+model <- model[do.call(order, as.data.frame(-model[,ncol(model):1])),]
+
+preds <- sapply(glmobjs, function(x) predict(x, as.matrix(drugTable), s = x$s))
+preds <- cbind(preds, apply(preds, 1, mean))
+dimnames(preds) <- list(drugIDs, c(alphaLabels, 'Mean'))
+preds <- preds[order(preds[,'Mean']),]
+
+modelProps <- sapply(glmobjs, function(x) {
+  lambda = x$s
+  df <- x$glmnet.fit$df[which(x$lambda == lambda)]
+  MSE <- x$cvm[which(x$lambda == lambda)]
+  RMSE <- sqrt(MSE)
+  CVRMSE <- sqrt(MSE) / diff(range(response))
+  c(x$lambda.min, lambda, df, MSE, RMSE, CVRMSE)
+})
+dimnames(modelProps) <- list(c('Lambda Min', 'Lambda', 'Number of Variables', 'CrossValMSE', 'RMSE', 'CVRMSE'), alphaLabels)
+
+rm(keep, controlWeight, lambdaMin, numLambdas, obsWeights, standardize, varPenalty, nfolds, algorithmType)
+
+#Identify key kinases
+keyKinases <- row.names(model[rowMeans(model[,-c(1)]) > 0,])
+keyKinases <- keyKinases[keyKinases != "Intercept"]
+keyKinaseInfo <- kinaseInfo[kinaseInfo$KIR %in% keyKinases, c(4,1:2,5:7)]
+
+
 #############
 # KiRNet v3 #
 #############
@@ -165,9 +253,6 @@ collapseSiblings <- function(beforeGraph){
 # Initiating general interactome #
 ##################################
 
-# Uncomment to set working directory
-# setwd()
-
 load("KiRNet_V3_Initializers")
 
 allNodes <- data.frame(SYMBOL = IDs$SYMBOL[IDs$SYMBOL %in% c(KEGGInteractions$FROM.SYMBOL, KEGGInteractions$TO.SYMBOL)],
@@ -194,7 +279,7 @@ generalSet <- graphToSet(generalGraph)
 ##########################################################################################
 
 # Load key functional nodes and continue annotating protein data
-keyFunctionalFile <- read_excel("Huh7_allData_Summary.xlsx", sheet = "keyKinases")
+keyFunctionalFile <- read_excel("Huh7_allData_public.xlsx", sheet = "keyKinases")
 keyFunctionalNames <- keyFunctionalFile$Huh7_Fzd2OE
 keyFunctionalNames <- keyFunctionalNames[keyFunctionalNames != "" & !is.na(keyFunctionalNames)]
 keyFunctionals <- kinaseInfo$SYMBOL[match(keyFunctionalNames, kinaseInfo$KIR)]
@@ -202,13 +287,13 @@ generalSet$Nodes$InKeyFunctional <- generalSet$Nodes$SYMBOL %in% keyFunctionals
 rm(keyFunctionalNames, keyFunctionals)
 
 # Load genetic mutations and annotate
-mutationsFile <- read_excel("Huh7_allData_Summary.xlsx", sheet = "geneMutations")
+mutationsFile <- read_excel("Huh7_allData_public.xlsx", sheet = "geneMutations")
 generalSet$Nodes$Mutated <- generalSet$Nodes$SYMBOL %in% mutationsFile$Symbol
 
 # Load RNA Seq data and continue annotating protein data
 RNA_cutoff <- 1     # RNA values AT OR BELOW this are considered not expressed.
 
-RNAfile <- read_excel("Huh7_allData_Summary.xlsx", sheet = "RNAseq")
+RNAfile <- read_excel("Huh7_allData_public.xlsx", sheet = "RNAseq")
 generalSet$Nodes$RNALevel <- log2(RNAfile$Huh7_Fzd2OE_Average[match(IDs$ENTREZ[match(generalSet$Nodes$SYMBOL, IDs$SYMBOL)], RNAfile$Entrez)] +1)
 generalSet$Nodes$Expressed <- if_else(generalSet$Nodes$RNALevel > RNA_cutoff, 1, -1)
 generalSet$Nodes$Expressed[is.na(generalSet$Nodes$Expressed)] <- 0
@@ -220,7 +305,7 @@ generalSet$Nodes$RNAsig[is.na(generalSet$Nodes$RNAsig)] <- 0
 rm(RNA_cutoff)
 
 # Load protein data
-proteinFile <- read_excel("Huh7_allData_Summary.xlsx", sheet = "proteinSites")
+proteinFile <- read_excel("Huh7_allData_public.xlsx", sheet = "proteinSites")
 proteinFile <- proteinFile[order(proteinFile$Symbol, -abs(proteinFile$Difference * proteinFile$sig)),]
 proteinFile <- proteinFile[!duplicated(proteinFile$Symbol),]
 generalSet$Nodes$ProteinLevel <- proteinFile$Huh7_Fzd2OE_average[match(generalSet$Nodes$SYMBOL, proteinFile$Symbol)]
@@ -230,7 +315,7 @@ generalSet$Nodes$ProteinSig <- proteinFile$sig[match(generalSet$Nodes$SYMBOL, pr
 generalSet$Nodes$ProteinSig[is.na(generalSet$Nodes$ProteinSig)] <- 0
 
 # Load phospho data
-phosphoFile <- read_excel("Huh7_allData_Summary.xlsx", sheet = "phosphoSites")
+phosphoFile <- read_excel("Huh7_allData_public.xlsx", sheet = "phosphoSites")
 phosphoFile <- phosphoFile[order(phosphoFile$Symbol, -abs(phosphoFile$Difference * phosphoFile$sig)),]
 phosphoFile <- phosphoFile[!duplicated(phosphoFile$Symbol),]
 generalSet$Nodes$PhosphoSig <- phosphoFile$sig[match(generalSet$Nodes$SYMBOL, phosphoFile$Symbol)]
